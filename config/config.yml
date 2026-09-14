@@ -1,0 +1,64 @@
+# Configuración del análisis RNA-seq con DESeq2.
+# Todas las rutas son relativas a la raíz del proyecto.
+
+project:
+  name: rnaseq-deseq2
+  title: "Respuesta transcriptómica a dexametasona en células de músculo liso de vía aérea"
+  seed: 20260913
+
+input:
+  # "airway": dataset de ejemplo del paquete Bioconductor 'airway'.
+  # "files" : matriz de conteos y hoja de muestras propias (ver data/raw/README.md).
+  source: airway
+  counts_file: data/raw/counts.tsv.gz
+  samples_file: data/raw/samples.tsv
+  sample_id_column: sample_id
+  # Exporta 'airway' a data/raw/ como ejemplo del formato de entrada esperado.
+  export_example_files: true
+
+design:
+  # La línea celular (donante) se incluye como covariable de bloqueo:
+  # cada línea tiene una muestra tratada y una control (diseño pareado).
+  formula: "~ cell + dex"
+  factor: dex          # variable de interés del contraste
+  reference: untrt     # nivel de referencia (denominador del fold change)
+  treatment: trt       # nivel comparado (numerador del fold change)
+
+filtering:
+  min_count: 10        # conteo mínimo por muestra
+  min_samples: 4       # nº mínimo de muestras con conteo >= min_count
+
+de:
+  alpha: 0.05          # FDR objetivo (padj)
+  lfc_threshold: 1     # |log2FC| contraído mínimo para considerar un gen DE
+  shrinkage: apeglm    # apeglm | normal | none
+
+annotation:
+  orgdb: org.Hs.eg.db
+  keytype: ENSEMBL
+
+enrichment:
+  run: true
+  ontology: BP         # BP (proceso) | MF (función) | CC (componente celular)
+  pvalue_cutoff: 0.05
+  qvalue_cutoff: 0.2
+  min_gs_size: 10
+  max_gs_size: 500
+  min_genes: 10        # nº mínimo de genes DE para ejecutar el ORA
+
+plots:
+  color_by: dex
+  shape_by: cell
+  annotation_cols: [dex, cell]
+  n_top_heatmap: 50
+  n_volcano_labels: 15
+  n_count_plots: 6
+  dpi: 300
+
+paths:
+  processed: data/processed
+  results: results
+  figures: results/figures
+  tables: results/tables
+  reports: results/reports
+  showcase_figures: docs/figures
