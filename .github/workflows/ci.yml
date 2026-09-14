@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Permisos mínimos: el workflow solo necesita leer el repositorio.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    name: Build image, test and run pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: rnaseq-deseq2:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run unit tests
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/home/rstudio/project" \
+            -w /home/rstudio/project rnaseq-deseq2:latest \
+            Rscript tests/run_tests.R
+
+      - name: Run analysis pipeline
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/home/rstudio/project" \
+            -w /home/rstudio/project rnaseq-deseq2:latest \
+            Rscript scripts/00_run_pipeline.R
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rnaseq-results
+          path: results/
+          retention-days: 14
