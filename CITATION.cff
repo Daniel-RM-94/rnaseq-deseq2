@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "Si utilizas este proyecto, por favor cítalo usando estos metadatos."
+title: "Análisis de expresión diferencial RNA-seq con DESeq2 y Bioconductor"
+type: software
+authors:
+  - family-names: "Rico"
+    given-names: "Daniel"
+version: 1.0.0
+date-released: 2026-09-13
+license: MIT
+repository-code: "https://github.com/Daniel-RM-94/rnaseq-deseq2"
+keywords:
+  - bioinformatics
+  - RNA-seq
+  - DESeq2
+  - Bioconductor
+  - differential expression
+  - Docker
