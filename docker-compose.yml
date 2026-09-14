@@ -1,0 +1,48 @@
+# Servicios:
+#   rstudio   RStudio Server en http://localhost:8787 (requiere .env)
+#   pipeline  ejecuta el análisis completo y genera el informe HTML
+#   tests     ejecuta los tests unitarios
+#
+# Uso:
+#   docker compose build
+#   docker compose run --rm pipeline
+#   docker compose run --rm tests
+#   docker compose up -d --wait rstudio
+name: rnaseq-deseq2
+
+x-analysis: &analysis
+  image: rnaseq-deseq2:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  working_dir: /home/rstudio/project
+  volumes:
+    - ./:/home/rstudio/project
+
+services:
+  rstudio:
+    <<: *analysis
+    ports:
+      # Solo accesible desde este equipo; no exponer RStudio Server a la red.
+      - "127.0.0.1:${RSTUDIO_PORT:-8787}:8787"
+    environment:
+      # Sin valor por defecto: se define en .env y se valida al arrancar.
+      PASSWORD: ${RSTUDIO_PASSWORD:-}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8787/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  pipeline:
+    <<: *analysis
+    profiles: ["jobs"]
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    command: ["Rscript", "scripts/00_run_pipeline.R"]
+
+  tests:
+    <<: *analysis
+    profiles: ["jobs"]
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    command: ["Rscript", "tests/run_tests.R"]

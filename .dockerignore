@@ -1,0 +1,14 @@
+.git
+.github
+.Rproj.user
+.Rhistory
+.RData
+.env
+.env.*
+!.env.example
+results
+data/processed
+data/raw/*
+!data/raw/README.md
+docs/figures
+**/*.html
