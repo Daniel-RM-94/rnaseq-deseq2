@@ -1,0 +1,387 @@
+---
+title: "Análisis de expresión diferencial RNA-seq con DESeq2"
+subtitle: "`r yaml::read_yaml(here::here('config', 'config.yml'))$project$title`"
+date: "`r format(Sys.Date(), '%Y-%m-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: hide
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.align = "center", fig.width = 8, fig.height = 5, dpi = 110
+)
+
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(SummarizedExperiment)
+  library(ggplot2)
+  library(enrichplot)
+})
+
+source(here::here("R", "utils.R"))
+load_project_functions()
+
+cfg <- load_config()
+processed_dir <- here::here(cfg$paths$processed)
+tables_dir <- here::here(cfg$paths$tables)
+
+dds <- readRDS(file.path(processed_dir, "dds_deseq.rds"))
+vsd_blind <- readRDS(file.path(processed_dir, "vsd_blind.rds"))
+vsd <- readRDS(file.path(processed_dir, "vsd_design.rds"))
+de_table <- readRDS(file.path(processed_dir, "de_results.rds"))
+de_summary <- summarise_de(de_table)
+filtering <- readr::read_tsv(file.path(tables_dir, "filtering_summary.tsv"),
+                             show_col_types = FALSE)
+qc_metrics <- readr::read_tsv(file.path(tables_dir, "qc_sample_metrics.tsv"),
+                              show_col_types = FALSE)
+
+enrichment_file <- file.path(processed_dir, "enrichment.rds")
+enrichment <- if (file.exists(enrichment_file)) readRDS(enrichment_file) else NULL
+has_enrichment <- !is.null(enrichment)
+
+is_airway <- cfg$input$source == "airway"
+design_cfg <- cfg$design
+plots_cfg <- cfg$plots
+
+fmt_int <- function(x) formatC(x, format = "d", big.mark = " ")
+pca_data <- plotPCA(vsd_blind, intgroup = unique(c(plots_cfg$color_by, plots_cfg$shape_by)),
+                    returnData = TRUE)
+pca_var <- round(100 * attr(pca_data, "percentVar"), 1)
+```
+
+# Resumen
+
+Este informe documenta un análisis de expresión génica diferencial a partir de
+datos de RNA-seq (conteos por gen) usando **DESeq2** y Bioconductor. Se compara
+la condición **`r design_cfg$treatment`** frente a **`r design_cfg$reference`**
+(variable `r design_cfg$factor`) con el diseño `r design_cfg$formula`.
+
+- Genes cuantificados: **`r fmt_int(filtering$n_genes[1])`**; genes analizados tras el filtrado: **`r fmt_int(filtering$n_genes[2])`**.
+- Genes diferencialmente expresados (padj < `r cfg$de$alpha`, |log2FC| ≥ `r cfg$de$lfc_threshold`):
+  **`r fmt_int(de_summary$total_significant)`**
+  (`r fmt_int(de_summary$up)` sobreexpresados y `r fmt_int(de_summary$down)` subexpresados).
+- Las dos primeras componentes principales explican el `r pca_var[1]` % y el `r pca_var[2]` % de la varianza.
+
+# Contexto y datos
+
+```{asis, echo = is_airway}
+## Estudio de origen
+
+Los datos provienen del paquete de Bioconductor
+[`airway`](https://bioconductor.org/packages/airway/), que contiene un
+subconjunto del estudio de **Himes et al. (2014)** (GEO:
+[GSE52778](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE52778)).
+En él se trataron **cuatro líneas celulares primarias de músculo liso de vía
+aérea humana** con **dexametasona 1 µM durante 18 horas**, comparándolas con
+controles sin tratar de la misma línea celular.
+
+Los glucocorticoides como la dexametasona son la base del tratamiento
+antiinflamatorio del asma. Estudiar su efecto transcriptómico en el músculo
+liso de la vía aérea ayuda a entender los mecanismos de su acción terapéutica.
+
+**Pregunta biológica:** ¿qué genes y procesos biológicos cambian su expresión
+en respuesta a la dexametasona?
+```
+
+```{asis, echo = !is_airway}
+## Datos de entrada
+
+Los datos se importaron desde una matriz de conteos y una hoja de muestras
+proporcionadas por el usuario (ver `config/config.yml`).
+```
+
+## Diseño experimental
+
+```{r sample-table}
+sample_cols <- unique(c(design_variables(design_cfg$formula), plots_cfg$annotation_cols))
+sample_table <- as.data.frame(colData(dds)[, sample_cols, drop = FALSE])
+sample_table <- cbind(sample_id = rownames(sample_table), sample_table,
+                      size_factor = round(sizeFactors(dds), 3))
+knitr::kable(sample_table, row.names = FALSE,
+             caption = "Muestras analizadas y factores de tamaño estimados por DESeq2.")
+```
+
+```{asis, echo = is_airway}
+Cada línea celular (`cell`) aporta una muestra tratada (`trt`) y una sin
+tratar (`untrt`). Este **diseño pareado** permite incluir la línea celular como
+covariable en el modelo (`~ cell + dex`), de modo que el efecto del tratamiento
+se estima *dentro* de cada línea celular y la variabilidad entre donantes no
+se confunde con el efecto de la dexametasona.
+```
+
+# Métodos
+
+El flujo completo está implementado en `scripts/` y se describe en detalle en
+[`docs/metodologia.md`](../../docs/metodologia.md). Resumen:
+
+1. **Filtrado**: se conservan los genes con al menos `r cfg$filtering$min_count`
+   conteos en al menos `r cfg$filtering$min_samples` muestras.
+2. **Normalización**: factores de tamaño por el método de la mediana de
+   cocientes (*median-of-ratios*) de DESeq2.
+3. **Modelado**: modelo lineal generalizado binomial negativo con el diseño
+   `r design_cfg$formula`; las dispersiones se estiman compartiendo información
+   entre genes (*empirical Bayes shrinkage*).
+4. **Contraste**: test de Wald para `r design_cfg$treatment` vs
+   `r design_cfg$reference`; p-valores ajustados por Benjamini-Hochberg (FDR)
+   con filtrado independiente.
+5. **Contracción del log2 fold change**: método `r cfg$de$shrinkage`, que
+   reduce los fold changes ruidosos de genes con pocos conteos y mejora el
+   ranking y la visualización.
+6. **Criterio de significancia**: padj < `r cfg$de$alpha` y
+   |log2FC contraído| ≥ `r cfg$de$lfc_threshold` (cambio ≥ `r 2^cfg$de$lfc_threshold` veces).
+7. **Transformación VST** para la exploración y visualización (PCA, heatmaps).
+8. **Enriquecimiento funcional**: Gene Ontology (`r cfg$enrichment$ontology`)
+   mediante ORA y GSEA con `clusterProfiler`.
+
+# Control de calidad
+
+## Tamaño de librería y distribución de conteos
+
+```{r library-sizes, fig.height = 4}
+plot_library_sizes(dds, plots_cfg$color_by)
+```
+
+Los tamaños de librería oscilan entre
+`r round(min(qc_metrics$total_counts) / 1e6, 1)` y
+`r round(max(qc_metrics$total_counts) / 1e6, 1)` millones de conteos. Estas
+diferencias de profundidad son las que corrigen los factores de tamaño
+(rango: `r round(min(qc_metrics$size_factor), 2)`–`r round(max(qc_metrics$size_factor), 2)`).
+
+```{r count-distribution, fig.height = 7}
+plot_count_distribution(dds, plots_cfg$color_by)
+```
+
+Tras la normalización, las medianas de las distribuciones se alinean entre
+muestras, lo que indica que la normalización es adecuada y que no hay muestras
+con perfiles globales anómalos.
+
+## Análisis de componentes principales
+
+```{r pca}
+plot_pca(vsd_blind, plots_cfg$color_by, plots_cfg$shape_by)
+```
+
+La PCA se calcula sobre los datos transformados con VST *sin* conocer el diseño
+(`blind = TRUE`), para evaluar de forma no sesgada las principales fuentes de
+variación.
+
+```{asis, echo = is_airway}
+La **PC1 separa las muestras según el tratamiento con dexametasona**, lo que
+indica que el tratamiento es la mayor fuente de variación del experimento. La
+**PC2 refleja diferencias entre líneas celulares**, lo que justifica incluir
+`cell` como covariable en el modelo.
+```
+
+## Distancias entre muestras
+
+```{r sample-distances, fig.height = 6, fig.width = 7}
+plot_sample_distances(vsd_blind, plots_cfg$annotation_cols)
+```
+
+El agrupamiento jerárquico de las distancias euclidianas confirma la estructura
+observada en la PCA y permite detectar posibles muestras atípicas u
+intercambiadas.
+
+# Expresión diferencial
+
+## Ajuste del modelo
+
+```{r dispersion, fig.width = 7, fig.height = 5}
+plotDispEsts(dds, main = "Estimación de dispersión")
+```
+
+Las estimaciones gen a gen (negro) se contraen hacia la tendencia ajustada
+(rojo), obteniendo los valores finales (azul). El patrón de dispersión
+decreciente con la expresión media es el esperado para datos de RNA-seq; los
+puntos marcados con círculo son genes cuya dispersión está muy por encima de la
+tendencia y no se contraen.
+
+## Resumen de resultados
+
+```{r de-summary}
+knitr::kable(
+  data.frame(
+    Métrica = c("Genes analizados", "Genes con padj (tras filtrado independiente)",
+                "Sobreexpresados", "Subexpresados", "Total significativos"),
+    Valor = fmt_int(unlist(de_summary[1, ]))
+  ),
+  caption = sprintf("Genes diferencialmente expresados (padj < %s, |log2FC| ≥ %s).",
+                    cfg$de$alpha, cfg$de$lfc_threshold)
+)
+```
+
+## MA plot y volcano plot
+
+```{r ma-plot}
+plot_ma(de_table, cfg$de$lfc_threshold)
+```
+
+El MA plot muestra que, gracias a la contracción `r cfg$de$shrinkage`, los genes
+poco expresados (izquierda) no presentan fold changes exagerados: los cambios
+grandes solo se mantienen cuando la evidencia es sólida.
+
+```{r volcano, fig.height = 6}
+plot_volcano(de_table, cfg$de$alpha, cfg$de$lfc_threshold, plots_cfg$n_volcano_labels)
+```
+
+## Genes más significativos
+
+```{r top-genes-table}
+top_table <- top_de_genes(de_table, 20)
+top_table <- data.frame(
+  Gen = gene_labels(top_table),
+  Descripción = if ("gene_name" %in% names(top_table)) top_table$gene_name else NA,
+  baseMean = round(top_table$baseMean),
+  log2FC = round(top_table$log2FoldChange, 2),
+  padj = signif(top_table$padj, 3),
+  Dirección = top_table$status
+)
+knitr::kable(top_table, caption = "Top 20 genes diferencialmente expresados ordenados por padj.")
+```
+
+```{asis, echo = is_airway}
+Entre los genes más significativos aparecen dianas clásicas de los
+glucocorticoides, como *DUSP1*, *KLF15*, *PER1*, *TSC22D3* (GILZ), *FKBP5* o
+*ZBTB16*, además de *CRISPLD2*, destacado por Himes et al. (2014) como gen de
+respuesta a glucocorticoides en músculo liso de vía aérea. Su presencia valida
+biológicamente el análisis.
+```
+
+```{r heatmap, fig.height = 9, fig.width = 7}
+plot_top_genes_heatmap(vsd, de_table, plots_cfg$n_top_heatmap, plots_cfg$annotation_cols)
+```
+
+El heatmap muestra la expresión (VST centrada por gen) de los genes más
+significativos: las muestras se agrupan por tratamiento, con patrones
+consistentes entre líneas celulares.
+
+```{r gene-counts, fig.height = 6, fig.width = 9}
+plot_gene_counts(dds, de_table, design_cfg$factor, plots_cfg$shape_by, plots_cfg$n_count_plots)
+```
+
+Los conteos normalizados individuales permiten comprobar que las diferencias
+son consistentes en todas las réplicas y no están impulsadas por una sola
+muestra.
+
+# Enriquecimiento funcional
+
+```{asis, echo = !has_enrichment}
+El análisis de enriquecimiento funcional está desactivado en la configuración
+(`enrichment: run: false`).
+```
+
+```{asis, echo = has_enrichment}
+Se usaron dos enfoques complementarios sobre Gene Ontology:
+
+- **ORA** (*over-representation analysis*): evalúa si ciertos términos GO
+  aparecen entre los genes sobreexpresados o subexpresados más de lo esperado
+  por azar. Como universo se usan todos los genes analizados, no el genoma
+  completo, para evitar sesgos hacia funciones generales de la célula.
+- **GSEA** (*gene set enrichment analysis*): usa la lista completa de genes
+  ordenada por el estadístico de Wald, sin aplicar umbrales, y detecta cambios
+  coordinados aunque sean moderados.
+```
+
+## ORA: genes sobreexpresados
+
+```{r ora-up, fig.height = 7, fig.width = 9, eval = has_enrichment}
+if (has_terms(enrichment$ora$up)) {
+  plot_enrichment_dotplot(enrichment$ora$up, "GO ORA: genes sobreexpresados")
+} else {
+  cat("No se encontraron términos GO significativos.")
+}
+```
+
+```{asis, echo = is_airway && has_enrichment}
+Entre los genes inducidos destaca la *respuesta celular a estímulos
+hormonales*, coherente con la activación del receptor de glucocorticoides por
+la dexametasona, junto con procesos del sistema muscular y de organización de
+la matriz extracelular, propios del músculo liso de vía aérea.
+```
+
+## ORA: genes subexpresados
+
+```{r ora-down, fig.height = 7, fig.width = 9, eval = has_enrichment}
+if (has_terms(enrichment$ora$down)) {
+  plot_enrichment_dotplot(enrichment$ora$down, "GO ORA: genes subexpresados")
+} else {
+  cat("No se encontraron términos GO significativos.")
+}
+```
+
+## GSEA
+
+```{r gsea, fig.height = 9, fig.width = 9, eval = has_enrichment}
+if (has_terms(enrichment$gsea)) {
+  plot_gsea_dotplot(enrichment$gsea)
+} else {
+  cat("No se encontraron términos GO significativos.")
+}
+```
+
+```{r gsea-table, eval = has_enrichment && has_terms(enrichment$gsea)}
+gsea_table <- as.data.frame(enrichment$gsea)
+gsea_table <- gsea_table[order(gsea_table$p.adjust), ]
+knitr::kable(
+  utils::head(data.frame(
+    ID = gsea_table$ID,
+    Término = gsea_table$Description,
+    Genes = gsea_table$setSize,
+    NES = round(gsea_table$NES, 2),
+    padj = signif(gsea_table$p.adjust, 3)
+  ), 15),
+  row.names = FALSE,
+  caption = "Top 15 términos GO por GSEA (NES > 0: activados; NES < 0: reprimidos)."
+)
+```
+
+```{r gsea-running, fig.height = 6, eval = has_enrichment && has_terms(enrichment$gsea)}
+gseaplot2(enrichment$gsea, geneSetID = seq_len(min(3, nrow(enrichment$gsea))),
+          pvalue_table = FALSE)
+```
+
+# Conclusiones
+
+- El control de calidad no reveló muestras atípicas; la principal fuente de
+  variación de los datos es la variable de interés (`r design_cfg$factor`).
+- Se identificaron **`r fmt_int(de_summary$total_significant)` genes
+  diferencialmente expresados** entre `r design_cfg$treatment` y
+  `r design_cfg$reference` bajo criterios conservadores (FDR y magnitud del
+  efecto).
+- El análisis funcional permite interpretar estos cambios en términos de
+  procesos biológicos; los resultados completos están en `results/tables/`.
+
+```{asis, echo = is_airway}
+En conjunto, los resultados reproducen la respuesta transcriptómica conocida a
+glucocorticoides en músculo liso de vía aérea, con la inducción de genes
+antiinflamatorios y reguladores de la señalización celular, en línea con lo
+descrito por Himes et al. (2014).
+```
+
+**Limitaciones:** el tamaño muestral es reducido (n = `r ncol(dds)`), el análisis
+se basa en conteos a nivel de gen (no de isoforma) y el enriquecimiento
+funcional depende de la completitud de las anotaciones GO. Los resultados
+deben considerarse generadores de hipótesis y validarse experimentalmente.
+
+# Referencias
+
+1. Love MI, Huber W, Anders S. Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. *Genome Biology*. 2014;15:550.
+2. Zhu A, Ibrahim JG, Love MI. Heavy-tailed prior distributions for sequence count data: removing the noise and preserving large differences. *Bioinformatics*. 2019;35(12):2084–2092.
+3. Himes BE, et al. RNA-Seq transcriptome profiling identifies CRISPLD2 as a glucocorticoid responsive gene that modulates cytokine function in airway smooth muscle cells. *PLoS ONE*. 2014;9(6):e99625.
+4. Wu T, et al. clusterProfiler 4.0: A universal enrichment tool for interpreting omics data. *The Innovation*. 2021;2(3):100141.
+5. Benjamini Y, Hochberg Y. Controlling the false discovery rate: a practical and powerful approach to multiple testing. *J R Stat Soc B*. 1995;57(1):289–300.
+6. Huber W, et al. Orchestrating high-throughput genomic analysis with Bioconductor. *Nature Methods*. 2015;12:115–121.
+
+# Información de la sesión
+
+```{r session-info}
+sessioninfo::session_info()
+```
