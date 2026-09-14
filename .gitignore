@@ -1,0 +1,33 @@
+# R y RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+.Rapp.history
+*.Rcheck/
+
+# Variables locales y secretos (solo se versiona la plantilla)
+.env
+.env.*
+!.env.example
+
+# Datos de entrada: solo se versiona su documentación
+data/raw/*
+!data/raw/README.md
+data/processed/*
+!data/processed/.gitkeep
+
+# Resultados del pipeline (se regeneran al ejecutarlo)
+results/*
+!results/README.md
+
+# Archivos generados al renderizar el informe
+reports/*.html
+reports/*_files/
+reports/*_cache/
+
+# Sistema operativo y editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

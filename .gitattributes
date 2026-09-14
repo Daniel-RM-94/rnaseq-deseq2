@@ -1,0 +1,8 @@
+# Finales de línea LF: los scripts se ejecutan en un contenedor Linux.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.pdf binary
+*.gz  binary
+*.rds binary
